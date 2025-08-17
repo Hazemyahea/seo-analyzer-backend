@@ -4,6 +4,15 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 const urlParser = require('url');
+const http = require('http'); // NEW: Import Node.js http module
+const https = require('https'); // NEW: Import Node.js https module
+
+// Configure axios to use Node.js's native http/https agents
+// This helps prevent 'File is not defined' errors when Axios or its dependencies
+// try to use browser-like APIs in a Node.js environment.
+axios.defaults.httpAgent = new http.Agent({ keepAlive: true });
+axios.defaults.httpsAgent = new https.Agent({ keepAlive: true });
+
 
 const app = express();
 app.use(cors()); // Allows any Origin
@@ -100,6 +109,7 @@ app.get('/analyze', async (req, res) => {
     });
 
 
+    // Custom SEO Score Calculation
     let score = 50;
     const strengths = [];
     const issues = [];
@@ -151,7 +161,6 @@ app.get('/analyze', async (req, res) => {
       externalDofollowLinks,
       externalNofollowLinks,
       schemaData,
-      // Removed keywordSuggestions from here
     });
   } catch (err) {
     console.error(err.message);
