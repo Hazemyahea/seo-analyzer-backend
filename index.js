@@ -1,11 +1,14 @@
-// index.js
+// Ensure File and Blob are not defined globally to prevent undici conflicts in some Node.js environments
+globalThis.File = undefined;
+globalThis.Blob = undefined;
+
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 const urlParser = require('url');
-const http = require('http'); // NEW: Import Node.js http module
-const https = require('https'); // NEW: Import Node.js https module
+const http = require('http'); // Import Node.js http module
+const https = require('https'); // Import Node.js https module
 
 // Configure axios to use Node.js's native http/https agents
 // This helps prevent 'File is not defined' errors when Axios or its dependencies
