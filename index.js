@@ -1,7 +1,3 @@
-// Ensure File and Blob are not defined globally to prevent undici conflicts in some Node.js environments
-globalThis.File = undefined;
-globalThis.Blob = undefined;
-
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -9,10 +5,11 @@ const cors = require('cors');
 const urlParser = require('url');
 const http = require('http'); // Import Node.js http module
 const https = require('https'); // Import Node.js https module
+require('dotenv').config(); // Re-added: Load environment variables from .env file
 
 // Configure axios to use Node.js's native http/https agents
-// This helps prevent 'File is not defined' errors when Axios or its dependencies
-// try to use browser-like APIs in a Node.js environment.
+// This helps prevent 'File is not defined' errors by ensuring Axios uses
+// Node.js's native networking capabilities directly.
 axios.defaults.httpAgent = new http.Agent({ keepAlive: true });
 axios.defaults.httpsAgent = new https.Agent({ keepAlive: true });
 
@@ -75,7 +72,7 @@ app.get('/analyze', async (req, res) => {
       if (href) {
         try {
           const absoluteHref = urlParser.resolve(baseUrl, href);
-          allLinks.push(absoluteHref); // Collect all links
+          allLinks.push(absoluteHref); // Collect all links for broken link check
           const parsedHref = urlParser.parse(absoluteHref);
           const rel = $(el).attr('rel') || '';
 
@@ -91,6 +88,86 @@ app.get('/analyze', async (req, res) => {
         } catch (linkError) {
           console.warn(`Could not parse link href: ${href} - ${linkError.message}`);
         }
+      }
+    });
+
+    // --- Broken Links Check (RESTORED) ---
+    const brokenLinks = [];
+    const uniqueLinksToCheck = [...new Set(allLinks)]; // Ensure unique links
+    const linkCheckPromises = uniqueLinksToCheck.map(link => {
+      return axios.get(link, { // Using GET request for better reliability
+          timeout: 10000, // Increased timeout to 10 seconds for individual link checks
+          maxContentLength: 2000, // Only download first 2KB for efficiency
+          responseType: 'arraybuffer', // Get as arraybuffer to prevent full parsing
+          maxRedirects: 5, // Allow up to 5 redirects
+          headers: { // Add more headers to mimic a browser
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+          },
+          validateStatus: function (status) {
+              // Resolve for 2xx, 3xx, 4xx responses.
+              // 5xx and network errors will be caught by the .catch() block.
+              return status >= 200 && status < 500; 
+          }
+        })
+        .then(response => {
+          // If status is 4xx (Client Error), it's considered broken.
+          if (response.status >= 400 && response.status < 500) {
+            return { url: link, status: response.status, type: 'Client Error' };
+          }
+          // For 2xx or 3xx (redirects), it's a good link, so return null to exclude it.
+          return null; 
+        })
+        .catch(error => {
+          let statusDetail = 'Unreachable';
+          let errorType = 'Network Issue'; // Default type for errors caught here
+
+          if (axios.isAxiosError(error)) {
+            if (error.response) {
+                statusDetail = error.response.status;
+                if (error.response.status >= 500) {
+                  errorType = 'Server Error'; 
+                } else if (error.response.status >= 400 && error.response.status < 500) {
+                    errorType = 'Client Error'; 
+                }
+            } else if (error.request) {
+              if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+                  statusDetail = 'Timeout';
+                  errorType = 'Network Issue';
+              } else if (error.code === 'ENOTFOUND') {
+                  statusDetail = 'DNS Resolution Failed';
+                  errorType = 'Network Issue';
+              } else if (error.code === 'ECONNREFUSED') {
+                  statusDetail = 'Connection Refused';
+                  errorType = 'Network Issue';
+              } else if (error.code === 'ERR_NETWORK') { 
+                  statusDetail = 'Generic Network Error';
+                  errorType = 'Network Issue';
+              } else {
+                  statusDetail = `Axios Request Error: ${error.code || error.message}`;
+                  errorType = 'Network Issue';
+              }
+            } else {
+              statusDetail = error.message || 'Axios Setup Error';
+              errorType = 'Unknown Axios Error';
+            }
+          } else { // Non-Axios errors
+            statusDetail = error.message || 'Unknown Error';
+            errorType = 'Non-Axios Error';
+          }
+          return { url: link, status: statusDetail, type: errorType };
+        });
+    });
+
+    const linkCheckResults = await Promise.allSettled(linkCheckPromises);
+    linkCheckResults.forEach(result => {
+      if (result.status === 'fulfilled' && result.value !== null) {
+        brokenLinks.push(result.value);
+      } else if (result.status === 'rejected') {
+        brokenLinks.push(result.reason); 
       }
     });
 
@@ -110,6 +187,60 @@ app.get('/analyze', async (req, res) => {
         console.warn('Could not parse JSON-LD schema:', e.message);
       }
     });
+
+    // --- Keyword Suggestions using LLM (RESTORED) ---
+    let keywordSuggestions = [];
+    let mainContent = '';
+    $('p, h1, h2, h3, h4, h5, h6, li, blockquote, article, main').each((i, el) => {
+        mainContent += $(el).text() + '\n';
+    });
+    mainContent = mainContent.replace(/\s\s+/g, ' ').trim();
+
+    const CONTENT_CHAR_LIMIT = 6000;
+    const contentToSendToLLM = mainContent.substring(0, CONTENT_CHAR_LIMIT);
+
+    if (contentToSendToLLM.length > 50) {
+      const chatHistory = [];
+      const prompt = `استخرج أهم الكلمات المفتاحية الرئيسية والفرعية من هذا النص. قم بتضمين كلمات مفتاحية طويلة الذيل (long-tail keywords). لا تقم بتضمين الكلمات المفتاحية الموجودة في سؤالك. قم بإرجاع قائمة بالكلمات المفتاحية فقط، كل كلمة مفتاحية في سطر جديد.
+      المحتوى:
+      ${contentToSendToLLM}
+      `;
+
+      chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+      const payload = { contents: chatHistory };
+      
+      const apiKey = process.env.GEMINI_API_KEY; // <---- Reading API Key from environment variable
+      if (!apiKey) {
+          console.error('GEMINI_API_KEY is not set in environment variables!');
+          keywordSuggestions = ["AI analysis failed: Gemini API key is missing. Please set GEMINI_API_KEY environment variable."];
+      } else {
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+        try {
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const rawKeywords = result.candidates[0].content.parts[0].text;
+                keywordSuggestions = rawKeywords.split('\n').map(k => k.trim()).filter(k => k.length > 0);
+            } else {
+                console.warn('Gemini API did not return expected keyword suggestions. Response:', result);
+            }
+        } catch (llmError) {
+            console.error('Error calling Gemini API for keyword suggestions:', llmError);
+            keywordSuggestions = ["Failed to get keyword suggestions from AI. Check your API key and network connection."];
+        }
+      }
+    } else {
+        keywordSuggestions = ["Not enough textual content to generate keyword suggestions."];
+    }
+    // --- End Keyword Suggestions ---
 
 
     // Custom SEO Score Calculation
@@ -138,6 +269,18 @@ app.get('/analyze', async (req, res) => {
 
     if (externalDofollowLinks.length > 0) { score += 5; strengths.push(`Found ${externalDofollowLinks.length} dofollow external links. Good for linking to authority sites. ✅`); }
     
+    // Penalize only confirmed broken links (4xx, 5xx)
+    const confirmedBrokenLinksCount = brokenLinks.filter(link => link.type === 'Client Error' || link.type === 'Server Error').length;
+    if (confirmedBrokenLinksCount > 0) { 
+        issues.push(`Found ${confirmedBrokenLinksCount} broken links. Fix them! ❌`); 
+        score -= (confirmedBrokenLinksCount * 5); // Increased penalty for actual broken links
+    }
+    // Warn for connection issues, but don't heavily penalize score
+    const networkIssueLinksCount = brokenLinks.filter(link => link.type === 'Network Issue' || link.type === 'Connection Problem').length;
+    if (networkIssueLinksCount > 0) {
+        issues.push(`Found ${networkIssueLinksCount} links with connection problems or timeouts. Check network or server configuration. ⚠️`);
+    }
+
     if (schemaData.length > 0) { strengths.push(`Found Schema Markup (${schemaData.join(', ')}) ✅`); score += 5; }
     else issues.push('No Schema Markup found. Consider adding it for rich results. ⚠️');
 
@@ -163,7 +306,9 @@ app.get('/analyze', async (req, res) => {
       internalLinks,
       externalDofollowLinks,
       externalNofollowLinks,
+      brokenLinks, // NEW: Re-added brokenLinks
       schemaData,
+      keywordSuggestions, // NEW: Re-added keywordSuggestions
     });
   } catch (err) {
     console.error(err.message);
